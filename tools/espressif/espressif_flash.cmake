@@ -170,7 +170,7 @@ else()
     if(NOT EXISTS "${BINARY_DIR}/nuttx.bin")
       message(FATAL_ERROR "nuttx.bin not found in ${BINARY_DIR}")
     endif()
-    list(APPEND ESPTOOL_BINS 0x0000 "${BINARY_DIR}/nuttx.bin")
+    list(APPEND ESPTOOL_BINS ${BL_OFFSET} "${BINARY_DIR}/nuttx.bin")
   endif()
 
   if(CONFIG_ESPRESSIF_SECURE_FLASH_ENC_ENABLED AND CONFIG_ESPRESSIF_SPIFLASH)
