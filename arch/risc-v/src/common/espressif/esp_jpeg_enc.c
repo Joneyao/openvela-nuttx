@@ -2,6 +2,12 @@
  * arch/risc-v/src/common/espressif/esp_jpeg_enc.c
  * ESP32-P4 Hardware JPEG Encoder in V4L2 M2M framework
  *
+ * Uses the esp-hal-3rdparty JPEG HAL (jpeg_new_encoder_engine /
+ * jpeg_encoder_process / jpeg_del_encoder_engine) to turn one RGB565
+ * frame queued on the OUTPUT queue into a JPEG bitstream on the CAPTURE
+ * queue.  Encoding is triggered from the *_available() callbacks, which
+ * the v4l2_m2m core invokes after every VIDIOC_QBUF.
+ *
  * SPDX-License-Identifier: Apache-2.0
  ****************************************************************************/
 
@@ -16,23 +22,21 @@
 #include <nuttx/mutex.h>
 #include <nuttx/video/v4l2_m2m.h>
 
-/* TODO: Include ESP-HAL JPEG headers when HAL is compiled:
- * #include "driver/jpeg_encode.h"
- * #include "driver/jpeg_types.h"
- */
-
-typedef void *jpeg_encoder_handle_t;
+#include "driver/jpeg_encode.h"
 
 #define JPEG_DEF_WIDTH    1024
 #define JPEG_DEF_HEIGHT   600
 #define JPEG_MAX_BUF      6
+#define JPEG_QUALITY      80
 
 struct esp_jpeg_dev_s
 {
   struct v4l2_format  out_fmt;
   struct v4l2_format  cap_fmt;
   jpeg_encoder_handle_t engine;
+  FAR void *cookie;              /* v4l2_m2m codec_file_t, for codec_*_buf() */
   size_t  encoded;
+  bool    out_pending;           /* OUTPUT queue holds a frame not yet encoded */
 };
 
 static int jpeg_cap_enum_fmt(FAR void *p, FAR struct v4l2_fmtdesc *f)
@@ -77,10 +81,94 @@ static size_t jpeg_out_bufcnt(FAR void *p) { return 4; }
 static FAR void *jpeg_alloc(FAR void *p, size_t sz) { return kmm_malloc(sz); }
 static void jpeg_free(FAR void *p, FAR void *a) { kmm_free(a); }
 
+/****************************************************************************
+ * Name: jpeg_encode_one
+ *
+ * Description:
+ *   Pull one RGB565 frame from the OUTPUT queue, encode it with the JPEG
+ *   HAL, and push the resulting bitstream into the CAPTURE queue.
+ *   Safe to call from either *_available() callback (the v4l2_m2m core
+ *   calls these after each QBUF on the respective queue); no-ops when a
+ *   frame or a capture buffer is missing.
+ *
+ ****************************************************************************/
+
+static int jpeg_encode_one(FAR void *priv)
+{
+  struct esp_jpeg_dev_s *d = priv;
+  FAR struct v4l2_buffer *in;
+  FAR struct v4l2_buffer *cap;
+  jpeg_encode_cfg_t cfg;
+  uint32_t out_sz = 0;
+  esp_err_t err;
+
+  /* Only encode when the OUTPUT queue holds a fresh, unencoded frame.
+   * Without this gate every capture QBUF (including the cleanup re-queue
+   * in jpegenc_main) would re-trigger an encode of the same frame. */
+  if (d->engine == NULL || !d->out_pending)
+    {
+      return 0;
+    }
+
+  in = codec_output_get_buf(d->cookie);
+  if (in == NULL)
+    {
+      return 0;
+    }
+
+  cap = codec_capture_get_buf(d->cookie);
+  if (cap == NULL)
+    {
+      codec_output_put_buf(d->cookie, in);
+      return 0;
+    }
+
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.width         = d->out_fmt.fmt.pix.width;
+  cfg.height        = d->out_fmt.fmt.pix.height;
+  cfg.src_type      = JPEG_ENCODE_IN_FORMAT_RGB565;
+  cfg.sub_sample    = JPEG_DOWN_SAMPLING_YUV420;
+  cfg.image_quality = JPEG_QUALITY;
+
+  err = jpeg_encoder_process(d->engine, &cfg,
+                             (FAR const uint8_t *)in->m.vaddr,
+                             in->length,
+                             (FAR uint8_t *)cap->m.vaddr,
+                             cap->length,
+                             &out_sz);
+  if (err != ESP_OK)
+    {
+      vwarn("jpeg encode failed: %d\n", err);
+      cap->bytesused = 0;
+      d->out_pending = false;
+      codec_capture_put_buf(d->cookie, cap);
+      codec_output_put_buf(d->cookie, in);
+      return 0;
+    }
+
+  vinfo("encoded %u x %u RGB565 -> %u bytes JPEG\n",
+        cfg.width, cfg.height, (unsigned int)out_sz);
+  cap->bytesused = out_sz;
+  d->encoded = out_sz;
+  d->out_pending = false;
+  codec_capture_put_buf(d->cookie, cap);
+  codec_output_put_buf(d->cookie, in);
+  return 0;
+}
+
 static int jpeg_open(FAR void *cookie, FAR void **priv)
 {
-  struct esp_jpeg_dev_s *d = kmm_zalloc(sizeof(*d));
-  if (!d) return -ENOMEM;
+  struct esp_jpeg_dev_s *d;
+  d = kmm_zalloc(sizeof(*d));
+  jpeg_encode_engine_cfg_t ecfg;
+  esp_err_t err;
+
+  if (d == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  d->cookie = cookie;
   d->out_fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
   d->out_fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB565;
   d->out_fmt.fmt.pix.width  = JPEG_DEF_WIDTH;
@@ -88,19 +176,54 @@ static int jpeg_open(FAR void *cookie, FAR void **priv)
   d->out_fmt.fmt.pix.sizeimage = JPEG_DEF_WIDTH * JPEG_DEF_HEIGHT * 2;
   d->cap_fmt = d->out_fmt;
   d->cap_fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_JPEG;
-  /* TODO: Allocate ESP-HAL JPEG encoder engine once HAL is compiled in */
-  d->engine = NULL;
-  *priv = d; return OK;
+
+  /* Create the ESP-HAL JPEG encoder engine.  One engine per open file;
+   * the HAL reference-counts the underlying codec handle internally. */
+
+  memset(&ecfg, 0, sizeof(ecfg));
+  ecfg.intr_priority = 0;   /* driver picks a default */
+  ecfg.timeout_ms    = 1000; /* 1 s is well above a 1024x600 encode */
+
+  err = jpeg_new_encoder_engine(&ecfg, &d->engine);
+  if (err != ESP_OK)
+    {
+      verr("jpeg_new_encoder_engine failed: %d\n", err);
+      kmm_free(d);
+      return -ENODEV;
+    }
+
+  *priv = d;
+  return OK;
 }
 
-static int jpeg_close(FAR void *priv) { kmm_free(priv); return OK; }
+static int jpeg_close(FAR void *priv)
+{
+  struct esp_jpeg_dev_s *d = priv;
 
-static int jpeg_cap_streamon(FAR void *priv) { ((struct esp_jpeg_dev_s *)priv)->encoded = 0; return OK; }
-static int jpeg_out_streamon(FAR void *priv) { return OK; }
-static int jpeg_cap_streamoff(FAR void *priv) { return OK; }
-static int jpeg_out_streamoff(FAR void *priv) { return OK; }
-static int jpeg_cap_avail(FAR void *priv) { return 0; }
-static int jpeg_out_avail(FAR void *priv) { return 0; }
+  if (d->engine != NULL)
+    {
+      jpeg_del_encoder_engine(d->engine);
+    }
+
+  kmm_free(d);
+  return OK;
+}
+
+static int jpeg_cap_streamon(FAR void *priv)
+{ struct esp_jpeg_dev_s *d = priv; d->encoded = 0; d->out_pending = false; return OK; }
+static int jpeg_out_streamon(FAR void *priv)
+{ ((struct esp_jpeg_dev_s *)priv)->out_pending = false; return OK; }
+static int jpeg_cap_streamoff(FAR void *priv)
+{ ((struct esp_jpeg_dev_s *)priv)->out_pending = false; return OK; }
+static int jpeg_out_streamoff(FAR void *priv)
+{ ((struct esp_jpeg_dev_s *)priv)->out_pending = false; return OK; }
+static int jpeg_cap_avail(FAR void *priv) { return jpeg_encode_one(priv); }
+static int jpeg_out_avail(FAR void *priv)
+{
+  struct esp_jpeg_dev_s *d = priv;
+  d->out_pending = true;
+  return jpeg_encode_one(priv);
+}
 
 static int jpeg_querycap(FAR void *priv, FAR struct v4l2_capability *cap)
 {

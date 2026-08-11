@@ -174,7 +174,12 @@ set(ESP32P4_INCLUDES
     ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_gpio/include
     ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/include
     ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/src
-    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_uart/include)
+    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_uart/include
+    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_jpeg/include
+    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_jpeg/${CHIP_SERIES}/include
+    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_jpeg/include
+    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_jpeg
+    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_jpeg/private)
 
 if(CONFIG_ESP32P4_SELECTS_REV_LESS_V3)
   list(APPEND ESP32P4_INCLUDES
@@ -443,6 +448,10 @@ list(
   ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/shared/ulp_lp_core_memory_shared.c
   ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/shared/ulp_lp_core_lp_timer_shared.c
   ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_ana_cmpr/ana_cmpr.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_dma/src/dma2d.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_dma/dma2d_hal.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_dma/esp32p4/dma2d_periph.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/hal/color_hal.c
   ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_dma/src/esp_dma_utils.c
   ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_dma/src/gdma_link.c
   ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_dma/src/gdma.c
@@ -458,7 +467,16 @@ list(
   ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_uart/src/uart_wakeup.c
   ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/components/newlib/newlib/libc/misc/init.c
   ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/heap_caps.c
-  ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/platform/os.c)
+  ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/platform/os.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_jpeg/esp32p4/jpeg_periph.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_jpeg/jpeg_hal.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_jpeg/jpeg_common.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_jpeg/jpeg_decode.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_jpeg/jpeg_emit_marker.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_jpeg/jpeg_encode.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_jpeg/jpeg_param.c
+  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_jpeg/jpeg_parse_marker.c
+  ${CMAKE_CURRENT_LIST_DIR}/../common/espressif/freertos/freertos_shim.c)
 
 if(CONFIG_ESPRESSIF_WIFI OR CONFIG_ESPRESSIF_EMAC)
   list(APPEND HAL_SRCS ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/esp_event.c)

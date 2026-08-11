@@ -28,11 +28,16 @@
 
 #include <nuttx/debug.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <syslog.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <nuttx/arch.h>
+
+#include "espressif/esp_usbserial.h"
 
 #include <nuttx/fs/fs.h>
 
@@ -182,6 +187,37 @@
 int esp_bringup(void)
 {
   int ret = OK;
+
+  /* Console gate: from here on dbg_putc() only records in the RAM
+   * marker and never touches the USB-Serial-JTAG TX FIFO.  The polled
+   * per-byte path would otherwise race the interrupt-driven console
+   * drain (esp_sendbuf) on the same 64-byte FIFO and corrupt app
+   * output. */
+
+  dbg_console_tx_set(false);
+
+  /* Neutralize the ROM bootloader's leftover UART0 interrupt route.
+   *
+   * The ROM routes UART0 (intr source 31) to CPU int 5 (CLIC 21) for its own
+   * console.  This board's console lives on USB-Serial-JTAG, so nobody ever
+   * services UART0: its interrupt line stays asserted (floating RX / stale
+   * FIFO), and the first driver that shares cpuint 5 through esp_intr_alloc
+   * (the JPEG encoder) and enables CLIC 21 turns that asserted line into an
+   * unstoppable level storm - shared_intr_isr only knows the JPEG vector, the
+   * JPEG status register reads 0 (no encode), nothing is cleared, and the
+   * dispatch re-fires forever ('k' flood).  This was the root cause of the
+   * jpegenc hang.
+   *
+   * Disable UART0's peripheral interrupt and re-route its source to the
+   * reserved INT_MUX_DISABLED_INTNO (CPU int 6, never enabled) so UART0 can
+   * never assert into any CLIC line again. */
+  {
+    volatile uint32_t *uart = (volatile uint32_t *)0x500CA000; /* DR_REG_UART0_BASE */
+    uart[0x10 / 4] = 0xffffffffu;  /* UART_INT_CLR: clear every pending bit */
+    uart[0x0c / 4] = 0;            /* UART_INT_ENA: mask the peripheral */
+    volatile uint32_t *map = (volatile uint32_t *)0x500D6000;  /* INTR_CORE0 */
+    map[31] = (map[31] & ~0x3Fu) | 6u;  /* source 31 -> INT_MUX_DISABLED_INTNO */
+  }
 
 #ifdef CONFIG_FS_PROCFS
   /* Mount the procfs file system */
@@ -613,7 +649,7 @@ int esp_bringup(void)
   /* Register JPEG encoder device (V4L2 M2M bridge to ESP-HAL) */
 
 #ifdef CONFIG_ESP32P4_JPEG_ENCODER
-  ret = esp_jpeg_encoder_register("/dev/jpeg");
+  ret = esp_jpeg_encoder_register("/dev/video1");
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: esp_jpeg_encoder_register failed: %d\n", ret);
