@@ -481,7 +481,8 @@ int esp_hr_timer_init(void)
 
   /* esp_timer_init() ROM call chain (0x4fc05ebc, 0x4fc05d1c, etc.)
    * causes PMP faults in NuttX. Skip entirely.
-   * EMAC link check timer will fail gracefully (NULL guard in esp_eth.c). */
+   * EMAC link check timer will fail gracefully (NULL guard in esp_eth.c,
+   * see esp-hal-3rdparty commit 0fd387dd2c5). */
 
   g_hr_timer_initialized = true;
   return OK;
