@@ -30,6 +30,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <debug.h>
+
 #include <nuttx/kmalloc.h>
 #include <nuttx/spinlock.h>
 
@@ -38,6 +40,10 @@
 
 #include "esp_private/esp_timer_private.h"
 #include "esp_timer_impl.h"
+
+#include "esp_err.h"
+
+#include "esp_usbserial.h"
 
 /****************************************************************************
  * Private Types
@@ -479,10 +485,20 @@ int esp_hr_timer_init(void)
       return OK;
     }
 
-  /* esp_timer_init() ROM call chain (0x4fc05ebc, 0x4fc05d1c, etc.)
-   * causes PMP faults in NuttX. Skip entirely.
-   * EMAC link check timer will fail gracefully (NULL guard in esp_eth.c,
-   * see esp-hal-3rdparty commit 0fd387dd2c5). */
+  /* Initialize the underlying ESP-HAL esp_timer subsystem.
+   * This calls esp_timer_init() which creates the timer task and sets up
+   * the LACT hardware alarm ISR. The NuttX OS adapter layer (os.c)
+   * provides nxtask_init-based task creation and native interrupt
+   * allocation, so this no longer hits ROM functions that would cause
+   * PMP faults.
+   */
+
+  esp_err_t err = esp_timer_init();
+  if (err != ESP_OK)
+    {
+      _err("esp_timer_init failed: %d\n", err);
+      return ERROR;
+    }
 
   g_hr_timer_initialized = true;
   return OK;

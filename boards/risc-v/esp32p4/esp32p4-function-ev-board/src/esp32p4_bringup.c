@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #include <nuttx/arch.h>
+#include <sched.h>
 
 #include "espressif/esp_usbserial.h"
 
@@ -164,6 +165,105 @@
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <nuttx/net/ioctl.h>
+
+#ifdef CONFIG_EXAMPLES_CAMPILOT
+extern int campilot_main(int argc, char *argv[]);
+
+static int configure_net(void)
+{
+  struct sockaddr_in addr;
+  struct ifreq ifr;
+  int fd;
+  int ret;
+
+  fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0)
+    {
+      printf("[campilot] socket failed: %d\n", errno);
+      return -1;
+    }
+
+  memset(&ifr, 0, sizeof(ifr));
+  strlcpy(ifr.ifr_name, "eth0", IFNAMSIZ);
+
+  /* Set netmask first */
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = inet_addr("255.255.248.0");
+  memcpy(&ifr.ifr_addr, &addr, sizeof(addr));
+  ret = ioctl(fd, SIOCSIFNETMASK, (unsigned long)&ifr);
+  printf("[campilot] SIOCSIFNETMASK: ret=%d errno=%d\n", ret, errno);
+
+  /* Set IP */
+  addr.sin_addr.s_addr = inet_addr("10.192.228.200");
+  memcpy(&ifr.ifr_addr, &addr, sizeof(addr));
+  ret = ioctl(fd, SIOCSIFADDR, (unsigned long)&ifr);
+  printf("[campilot] SIOCSIFADDR: ret=%d errno=%d\n", ret, errno);
+
+  /* Set gateway */
+  addr.sin_addr.s_addr = inet_addr("10.192.224.1");
+  memcpy(&ifr.ifr_addr, &addr, sizeof(addr));
+  ret = ioctl(fd, SIOCSIFDSTADDR, (unsigned long)&ifr);
+  printf("[campilot] SIOCSIFDSTADDR: ret=%d errno=%d\n", ret, errno);
+
+  /* Read back IP */
+  ret = ioctl(fd, SIOCGIFADDR, (unsigned long)&ifr);
+  if (ret >= 0)
+    {
+      struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_addr;
+      printf("[campilot] SIOCGIFADDR verify: %s\n", inet_ntoa(sin->sin_addr));
+    }
+  else
+    {
+      printf("[campilot] SIOCGIFADDR failed: ret=%d errno=%d\n", ret, errno);
+    }
+
+  /* Read back netmask */
+  ret = ioctl(fd, SIOCGIFNETMASK, (unsigned long)&ifr);
+  if (ret >= 0)
+    {
+      struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_addr;
+      printf("[campilot] SIOCGIFNETMASK verify: %s\n", inet_ntoa(sin->sin_addr));
+    }
+
+  close(fd);
+  printf("[campilot] network configured\n");
+  return 0;
+}
+
+static int campilot_auto(int argc, char *argv[])
+{
+  int ret;
+
+  printf("[campilot] auto-test starting...\n");
+
+  /* Wait a bit for netinit thread to finish */
+  usleep(500000);
+
+  ret = configure_net();
+  if (ret < 0)
+    printf("[campilot] net config failed\n");
+
+  printf("[campilot] === text hello ===\n");
+
+  char *cargs[] = {"campilot", "text", "hello", NULL};
+  campilot_main(3, cargs);
+
+  printf("[campilot] auto-test done\n");
+  return 0;
+}
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -683,6 +783,7 @@ int esp_bringup(void)
      * ESP-HAL JPEG engine's DPUT trace inside jpeg_new_encoder_engine(). */
 
     dbg_console_tx_set(false);
+#define BRINGUP_MARK(c) do { } while(0)
     *((volatile uint32_t *)0x5010ffc4) = 0;
     *((volatile uint32_t *)0x5010ffc8) = 0;
     *((volatile uint32_t *)0x5010ff90) = 0;
@@ -744,15 +845,18 @@ int esp_bringup(void)
     volatile uint32_t *map = (volatile uint32_t *)0x500D6000;  /* INTR_CORE0 */
     map[31] = (map[31] & ~0x3Fu) | 6u;  /* source 31 -> INT_MUX_DISABLED_INTNO */
   }
+  BRINGUP_MARK('1');  /* checkpoint: UART0 neutralized */
 
 #ifdef CONFIG_FS_PROCFS
   /* Mount the procfs file system */
 
+  BRINGUP_MARK('2');  /* checkpoint: before procfs mount */
   ret = nx_mount(NULL, "/proc", "procfs", 0, NULL);
   if (ret < 0)
     {
       _err("Failed to mount procfs at /proc: %d\n", ret);
     }
+  BRINGUP_MARK('A');  /* checkpoint: procfs mounted */
 #endif
 
 #ifdef CONFIG_FS_TMPFS
@@ -1088,11 +1192,13 @@ int esp_bringup(void)
 #endif
 
 #ifdef CONFIG_ESPRESSIF_EMAC
+  BRINGUP_MARK('3');  /* checkpoint: before EMAC init */
   ret = board_emac_init();
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: board_emac_init failed: %d\n", ret);
     }
+  BRINGUP_MARK('B');  /* checkpoint: EMAC init done */
 #endif
 
 #ifdef CONFIG_ESPRESSIF_USE_LP_CORE
@@ -1180,6 +1286,15 @@ int esp_bringup(void)
     {
       syslog(LOG_ERR, "ERROR: esp_jpeg_encoder_register failed: %d\n", ret);
     }
+#endif
+
+#ifdef CONFIG_EXAMPLES_CAMPILOT
+  /* Auto-test campilot at boot: wait for network late-init then
+   * send a text query to MiMo API. Output appears on serial console
+   * so we can verify without interactive input. */
+  BRINGUP_MARK('4');  /* checkpoint: before campilot task */
+  task_create("cptest", 100, 16384, campilot_auto, NULL);
+  BRINGUP_MARK('C');  /* checkpoint: campilot task created */
 #endif
 
   /* If we got here then perhaps not all initialization was successful, but
