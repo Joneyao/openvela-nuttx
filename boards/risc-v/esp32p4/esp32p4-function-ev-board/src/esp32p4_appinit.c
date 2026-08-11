@@ -27,11 +27,19 @@
 #include <nuttx/config.h>
 
 #include <sys/types.h>
+#include <stdio.h>
+#include <stdint.h>
 
+#include <nuttx/arch.h>
 #include <nuttx/board.h>
 #include <nuttx/fs/fs.h>
 
 #include "esp32p4-function-ev-board.h"
+
+/* RAM debug marker survives warm resets at this fixed SRAM address; print the
+ * previous run's last marker at every boot to aid post-hang diagnosis. */
+
+#define DBG_MARK_ADDR ((volatile uint32_t *)0x4ffae000)
 
 #ifdef CONFIG_BOARDCTL
 
@@ -41,6 +49,21 @@
 
 int board_app_initialize(uintptr_t arg)
 {
+  uint32_t m = *DBG_MARK_ADDR;
+  static const char hex[] = "0123456789abcdef";
+
+  /* Polled output via up_putc: printf at this boot stage is dropped. */
+
+  up_putc('M');                       /* 'M' = marker dump follows */
+  up_putc(hex[(m >> 28) & 0xF]);
+  up_putc(hex[(m >> 24) & 0xF]);
+  up_putc(hex[(m >> 20) & 0xF]);
+  up_putc(hex[(m >> 16) & 0xF]);
+  up_putc(hex[(m >> 12) & 0xF]);
+  up_putc(hex[(m >>  8) & 0xF]);
+  up_putc(hex[(m >>  4) & 0xF]);
+  up_putc(hex[m & 0xF]);
+  up_putc('\n');
   return OK;
 }
 

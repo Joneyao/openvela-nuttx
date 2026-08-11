@@ -30,6 +30,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
+#include <stdio.h>
 #include <debug.h>
 #include <unistd.h>
 
@@ -37,6 +38,18 @@
 #include <nuttx/kmalloc.h>
 
 #include "esp_cam_sensor.h"
+
+/* Direct-to-console diagnostic output.
+ *
+ * syslog() goes through RAMLOG (/dev/kmsg) and is forwarded to the console
+ * asynchronously by a poll task.  If the system crashes mid-init, the
+ * buffered lines are lost.  This macro writes straight to stdout and flushes
+ * it so each sensor-init step is visible on the serial console even across a
+ * crash.
+ */
+
+#define SC_DBG(fmt, ...) \
+  do { printf("SC: " fmt, ##__VA_ARGS__); fflush(stdout); } while (0)
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -371,11 +384,13 @@ static int sc2336_check_chip_id(void)
 
   chip_id = ((uint16_t)id_h << 8) | id_l;
 
+  SC_DBG("chip_id = 0x%04x (expected 0x%04x)\n", chip_id, SC2336_CHIP_ID);
   syslog(LOG_INFO, "SC2336: Chip ID = 0x%04x (expected 0x%04x)\n",
          chip_id, SC2336_CHIP_ID);
 
   if (chip_id != SC2336_CHIP_ID)
     {
+      SC_DBG("chip ID mismatch!\n");
       syslog(LOG_ERR, "SC2336: Chip ID mismatch!\n");
       return -ENODEV;
     }
@@ -426,19 +441,31 @@ static int sc2336_write_init_sequence(void)
 
           int w;
 
+          SC_DBG("sw reset (0x0103=0x01), NACK expected...\n");
           sc2336_i2c_write_reg(reg, val);   /* NACK expected; reset applied */
 
-          for (w = 0; w < 50; w++)          /* up to ~500ms */
+          for (w = 0; w < 100; w++)         /* up to ~1000ms */
             {
               uint8_t id_h;
 
               usleep(10000);                /* 10ms per poll */
-              if (sc2336_i2c_read_reg(SC2336_CHIP_ID_H_REG, &id_h) >= 0)
+              if (sc2336_i2c_read_reg(SC2336_CHIP_ID_H_REG, &id_h) >= 0 &&
+                  id_h == ((SC2336_CHIP_ID >> 8) & 0xff))
                 {
                   break;
                 }
             }
 
+          /* Extra settling time after the reset so the first register write
+           * (0x0100 sleep mode) is not issued into a partially-initialized
+           * sensor.  The ESP-IDF reference delays only 5 ms here, but this
+           * NuttX I2C path has seen the bus remain flaky right after the
+           * reset completes, so give it a little more room.
+           */
+
+          usleep(20000);                    /* 20ms extra settle */
+
+          SC_DBG("sensor ready %d ms after reset\n", (w + 1) * 10);
           syslog(LOG_INFO, "SC2336: sensor ready %d ms after reset\n",
                  (w + 1) * 10);
           count++;
@@ -448,9 +475,31 @@ static int sc2336_write_init_sequence(void)
       ret = sc2336_i2c_write_reg(reg, val);
       if (ret < 0)
         {
-          syslog(LOG_ERR, "SC2336: Init sequence failed at index %d "
-                 "(reg=0x%04x)\n", i, reg);
-          return ret;
+          int t;
+
+          /* The first write right after reset can still hit a flaky bus
+           * (sensor not fully out of reset yet).  Retry a few times with a
+           * small delay; each retry re-sends the whole write transaction,
+           * which also re-arbitrates the bus and clears transient hangs.
+           */
+
+          SC_DBG("write fail reg=0x%04x ret=%d, retrying...\n", reg, ret);
+          for (t = 0; t < 3 && ret < 0; t++)
+            {
+              usleep(20000);                /* 20ms between retries */
+              ret = sc2336_i2c_write_reg(reg, val);
+            }
+
+          if (ret < 0)
+            {
+              SC_DBG("init seq fail idx=%u reg=0x%04x ret=%d\n",
+                     i, reg, ret);
+              syslog(LOG_ERR, "SC2336: Init sequence failed at index %d "
+                     "(reg=0x%04x)\n", i, reg);
+              return ret;
+            }
+
+          SC_DBG("write reg=0x%04x ok after retry\n", reg);
         }
 
       count++;
@@ -458,6 +507,7 @@ static int sc2336_write_init_sequence(void)
 
   syslog(LOG_INFO, "SC2336: Init sequence written (%u registers)\n",
          count);
+  SC_DBG("init sequence written (%u regs)\n", count);
   return OK;
 }
 
@@ -479,6 +529,7 @@ int esp_cam_sensor_init(void)
       return OK;
     }
 
+  SC_DBG("esp_cam_sensor_init: enter\n");
   syslog(LOG_INFO, "SC2336: Initializing camera sensor\n");
 
   /* Get the I2C bus instance.
@@ -490,9 +541,12 @@ int esp_cam_sensor_init(void)
   g_i2c_dev = esp_i2cbus_initialize(SC2336_I2C_PORT);
   if (g_i2c_dev == NULL)
     {
+      SC_DBG("i2cbus_initialize failed\n");
       syslog(LOG_ERR, "SC2336: Failed to get I2C bus %d\n", SC2336_I2C_PORT);
       return -ENODEV;
     }
+
+  SC_DBG("i2c bus %d ok (%p)\n", SC2336_I2C_PORT, g_i2c_dev);
 #else
   syslog(LOG_WARNING, "SC2336: I2C not enabled, sensor init skipped\n");
   g_sensor_initialized = true;
@@ -501,6 +555,7 @@ int esp_cam_sensor_init(void)
 
   /* Verify chip ID with retries (sensor may need time after power up) */
 
+  SC_DBG("checking chip id...\n");
   syslog(LOG_INFO, "SC2336: Checking chip ID...\n");
 
   for (retry = 0; retry < 3; retry++)
@@ -523,6 +578,8 @@ int esp_cam_sensor_init(void)
              "MIPI CSI connector.\n");
       return ret;
     }
+
+  SC_DBG("writing init sequence...\n");
 
   /* Write initialization register sequence */
 
