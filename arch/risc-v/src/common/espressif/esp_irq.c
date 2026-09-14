@@ -57,12 +57,6 @@
 #  include "esp_private/interrupt_clic.h"
 #endif // SOC_INT_CLIC_SUPPORTED
 
-/* Debug probe for capturing interrupt dispatch info.
- * Set non-zero to arm a one-shot probe that prints mcause
- * the next time esp_irq_dispatch() is entered. */
-
-volatile int g_arm_dbg = 0;
-
 #include "esp_private/vectors_const.h"
 
 #ifndef CONFIG_ARCH_CHIP_ESP32C3
@@ -567,106 +561,6 @@ void esp_teardown_irq(int source, int cpuint)
 
 IRAM_ATTR void *riscv_dispatch_irq(uintreg_t mcause, uintreg_t *regs)
 {
-  /* Storm counter + latched storm mcause: plain RAM writes (never printed,
-   * never block), so a reset + read tells us whether the CPU was spinning in
-   * a dispatch storm and which trap source it was.  Addresses:
-   * 0x5010ffe4 = storm counter (0x5010ffe0 = app marker, 0x5010fff0 = boot/
-   * driver marker, 0x5010ffe8 = mcause latched when counter first exceeds
-   * 50000; esp_bringup zeroes counter+latch after dumping, so the latch
-   * always captures the PREVIOUS run's storm source and survives reset). */
-  {
-    volatile uint32_t *cnt = (volatile uint32_t *)0x5010ffe4;
-    volatile uint32_t *lc = (volatile uint32_t *)0x5010ffe8;
-    volatile uint32_t *irq_lc = (volatile uint32_t *)0x5010ffec;
-    *cnt = *cnt + 1;
-    if (*cnt > 1000 && *lc == 0)
-      {
-        *lc = (uint32_t)mcause;
-        /* Resolve the storm cpuint back to an IRQ.  If the interrupting
-         * peripheral was allocated via ESP-HAL's esp_intr_alloc_* (jpeg,
-         * dma2d) instead of NuttX's esp_setup_irq, no handle was ever put
-         * in g_handle_map, so this returns -1 (0xffffffff) and dispatch can
-         * never service the interrupt -> level-triggered storm. */
-        if ((RISCV_IRQ_BIT & mcause) != 0)
-          {
-            uint8_t cpuint = (uint8_t)((mcause & VECTORS_MCAUSE_REASON_MASK) -
-                                       RV_EXTERNAL_INT_OFFSET);
-            *irq_lc = (uint32_t)esp_cpuint_to_irq(cpuint, this_cpu());
-          }
-        else
-          {
-            *irq_lc = 0xffffffffu;
-          }
-      }
-  }
-
-  /* Non-zeroed dispatch counter at 0x5010ff00.  Unlike the storm counter
-   * (0x5010ffe4) this one is NOT cleared by esp_bringup after dumping, so a
-   * boot M dump always reads the accumulated dispatch count.  The jpegnc app
-   * records this value right before its final console flush (PR stage) into
-   * 0x5010ff04; the post-hang dump's delta (0x5010ff00 - 0x5010ff04) is the
-   * number of dispatches during the hang window plus the boot.  A delta far
-   * larger than a normal boot's dispatch count means the tick kept firing
-   * while the writer was stuck (CPU alive, lost-wakeup); a delta ~= boot only
-   * means the CPU globally wedged with interrupts off. */
-  {
-    volatile uint32_t *dsp = (volatile uint32_t *)0x5010ff00;
-    *dsp = *dsp + 1;
-  }
-
-  /* Last-16-trap mcause ring at 0x5010fe00..0x5010fe3c, head index at
-   * 0x5010fe40.  Survives warm reset; the M dump prints it so we can see
-   * whether the storm is one interrupt repeating or a mix of traps. */
-  {
-    volatile uint32_t *ring = (volatile uint32_t *)0x5010fe00;
-    volatile uint32_t *head = (volatile uint32_t *)0x5010fe40;
-    uint32_t h = *head;
-    ring[(h & 0xF)] = (uint32_t)mcause;
-    *head = h + 1;
-  }
-
-  /* Console xmit-buffer + peripheral latch, refreshed on EVERY dispatch.
-   * The tick keeps firing while jpegnc is wedged in its final console flush,
-   * so the last write here captures the driver state at the moment it
-   * stopped draining -- read back in the boot M dump's C: field.  The two
-   * head/tail/semcount values distinguish where uart_write() wedges:
-   *   head==tail (buffer empty)      -> stuck on nxmutex_lock(&xmit.lock)
-   *   head/tail ~size apart (full)   -> stuck on nxsem_wait(&xmitsem) with
-   *                                      IN_EMPTY masked and nobody draining
-   * Slots:
-   *   0x5010ffa0 = xmit.head<<16 | xmit.tail
-   *   0x5010ffa4 = xmitsem.semcount
-   *   0x5010ffa8 = USJ INT_ENA (IN_EMPTY = bit3, OUT_RECV_PKT = bit2)
-   *   0x5010ffac = USJ INT_ST  (IN_EMPTY pending = bit3)
-   *   0x5010ffb4 = USJ EP1_CONF (serial_in_ep_data_free = TX fifo has room) */
-  {
-    extern uart_dev_t g_uart_usbserial;
-    volatile uint32_t *usj = (volatile uint32_t *)0x500D2000;
-    uint16_t h = (uint16_t)g_uart_usbserial.xmit.head;
-    uint16_t t = (uint16_t)g_uart_usbserial.xmit.tail;
-    int16_t sc = *(volatile int16_t *)&g_uart_usbserial.xmitsem;
-    *((volatile uint32_t *)0x5010ffa0) = ((uint32_t)h << 16) | t;
-    *((volatile uint32_t *)0x5010ffa4) = (uint32_t)sc;
-    *((volatile uint32_t *)0x5010ffa8) = usj[0x10 / 4];  /* USJ int_ena */
-    *((volatile uint32_t *)0x5010ffac) = usj[0x0c / 4];  /* USJ int_st */
-    *((volatile uint32_t *)0x5010ffb4) = usj[0x04 / 4];  /* USJ ep1_conf */
-  }
-
-  /* One-shot probe: armed right before the JPEG up_irq_restore re-enables
-   * MIE.  Prints the first dispatched interrupt/exception mcause so we can
-   * tell an ISR storm / trap apart from a stuck main flow. */
-  extern volatile int g_arm_dbg;
-  extern void up_putc(int ch);
-  static const char hex[] = "0123456789ABCDEF";
-  if (g_arm_dbg)
-    {
-      g_arm_dbg = 0;
-      up_putc('T'); up_putc(hex[(mcause >> 28) & 0xF]); up_putc(hex[(mcause >> 24) & 0xF]);
-      up_putc(hex[(mcause >> 20) & 0xF]); up_putc(hex[(mcause >> 16) & 0xF]);
-      up_putc(hex[(mcause >> 12) & 0xF]); up_putc(hex[(mcause >> 8) & 0xF]);
-      up_putc(hex[(mcause >> 4) & 0xF]);  up_putc(hex[mcause & 0xF]); up_putc(' ');
-    }
-
   int irq;
   bool is_irq = (RISCV_IRQ_BIT & mcause) != 0;
   bool is_edge = false;
