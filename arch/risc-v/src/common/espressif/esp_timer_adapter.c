@@ -30,8 +30,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <debug.h>
-
 #include <nuttx/kmalloc.h>
 #include <nuttx/spinlock.h>
 
@@ -42,8 +40,6 @@
 #include "esp_timer_impl.h"
 
 #include "esp_err.h"
-
-#include "esp_usbserial.h"
 
 /****************************************************************************
  * Private Types
@@ -485,20 +481,30 @@ int esp_hr_timer_init(void)
       return OK;
     }
 
-  /* Initialize the underlying ESP-HAL esp_timer subsystem.
-   * This calls esp_timer_init() which creates the timer task and sets up
-   * the LACT hardware alarm ISR. The NuttX OS adapter layer (os.c)
-   * provides nxtask_init-based task creation and native interrupt
-   * allocation, so this no longer hits ROM functions that would cause
-   * PMP faults.
+  /* DO NOT call esp_timer_init() here.
+   *
+   * esp_timer_init() -> esp_timer_impl_init() -> esp_intr_alloc() still
+   * walks ESP-HAL's ROM-resident interrupt allocator (get_desc_for_int(),
+   * esp_intr_enable(), etc: the ROM call chain reaches 0x4fc05ebc /
+   * 0x4fc05d1c) regardless of the NuttX OS adapter layer (os.c) that
+   * handles task creation. That ROM code dereferences a NULL/stale
+   * pointer on this NuttX port and takes a PMP Load access fault,
+   * which panics AppBringUp (board_emac_init -> esp_hr_timer_init) and
+   * wedges the board in an LP WDT reset loop before the console ever
+   * comes up.
+   *
+   * This was fixed once (commit 367d694ea20, 2026-08-05) and
+   * accidentally reverted while cleaning up debug markers (commit
+   * 10d79a9b173, 2026-08-11) under the mistaken assumption that the
+   * NuttX task-creation adapter also covered interrupt allocation.
+   * Re-verified 2026-09-14 via OpenOCD/gdb: mepc=0x4fc05ebc,
+   * mtval=0x64, task=AppBringUp -- identical to the original crash.
+   *
+   * Keep skipping the ESP-HAL timer init until esp_intr_alloc() itself
+   * is ported to NuttX's native interrupt system. The EMAC link-check
+   * timer fails gracefully without it (NULL guard in esp_eth.c, see
+   * esp-hal-3rdparty commit 0fd387dd2c5).
    */
-
-  esp_err_t err = esp_timer_init();
-  if (err != ESP_OK)
-    {
-      _err("esp_timer_init failed: %d\n", err);
-      return ERROR;
-    }
 
   g_hr_timer_initialized = true;
   return OK;
