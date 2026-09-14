@@ -759,11 +759,23 @@ int esp_bringup(void)
 #endif
 
 #ifdef CONFIG_EXAMPLES_CAMPILOT
-  /* Auto-test campilot at boot: wait for network late-init then
-   * send a text query to MiMo API. Output appears on serial console
-   * so we can verify without interactive input. */
+  /* Auto-test campilot at boot: wait for network late-init then send a
+   * text query to MiMo API. Output appears on serial console so we can
+   * verify without interactive input.
+   *
+   * Temporarily disabled (CAMPILOT_AUTOTEST_AT_BOOT 0) 2026-09-14: the
+   * console wedges (NSH stops responding to input) some time after this
+   * task runs to completion. Root cause not yet identified -- ruled out
+   * task priority and the JPEG encoder. "campilot" is still available as
+   * an interactive NSH command; only the auto-run-at-boot path is
+   * skipped while this is being investigated. */
+
+#define CAMPILOT_AUTOTEST_AT_BOOT 0
+
+#if CAMPILOT_AUTOTEST_AT_BOOT
   int cpret = task_create("cptest", 100, 16384, campilot_auto, NULL);
   printf("[campilot] task_create ret=%d errno=%d\n", cpret, errno);
+#endif
 #endif
 
   /* If we got here then perhaps not all initialization was successful, but
