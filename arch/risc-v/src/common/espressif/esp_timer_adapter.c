@@ -504,6 +504,15 @@ int esp_hr_timer_init(void)
    * is ported to NuttX's native interrupt system. The EMAC link-check
    * timer fails gracefully without it (NULL guard in esp_eth.c, see
    * esp-hal-3rdparty commit 0fd387dd2c5).
+   *
+   * NOTE: returning OK here is deliberately a "fake success" -- the HR
+   * timer is NOT usable afterwards. esp_hr_timer_create() and
+   * esp_hr_timer_start*() still call ESP-HAL's esp_timer_create(), which
+   * safely fails (returns an error, does not fault) because
+   * esp_timer_init() never ran and the ESP-HAL layer guards its
+   * uninitialized state. board_emac_init() relies on this so the EMAC
+   * driver keeps initializing and degrades gracefully instead of
+   * aborting the whole bringup.
    */
 
   g_hr_timer_initialized = true;
