@@ -281,6 +281,8 @@ return_from_exception:
   REGLOAD    s0, REG_INT_CTX(sp)  /* restore status */
   ori        s0, s0, STATUS_IE    /* Ensure MIE=1 for CLIC mode */
   ori        s0, s0, STATUS_PIE   /* Ensure MPIE=1 after ecall */
+  li         t0, STATUS_PPP       /* Ensure MPP=M-mode for CLIC mode */
+  or         s0, s0, t0
   csrw       CSR_STATUS, s0
 #ifdef CONFIG_ARCH_RV_HAVE_CLIC
   REGLOAD    s0, REG_INT_THRESH(sp) /* restore interrupt threshold */
