@@ -235,13 +235,23 @@ static int esp_isr_demultiplexing(int irq, void *context, void *arg)
     {
       /* ESP-HAL peripheral ISRs are compiled against ESP-IDF (reached via
        * _global_interrupt_handler, not a C tail-call frame) and may not
-       * preserve every callee-saved register. If this call were tail-call
-       * optimized it would jump straight back to riscv_doirq and skip this
-       * function's epilogue, leaking any callee-saved register the ISR
-       * clobbers (s1 in the JPEG/DMA case). The function is marked
-       * no-optimize-sibling-calls so the epilogue always restores s0-s3. */
+       * preserve every callee-saved register. Run the ISR with interrupts
+       * masked and keep no-optimize-sibling-calls so the epilogue restores
+       * s0-s3. */
+
+      uint32_t s1_slot, s1_reg;
+      irqstate_t flags = up_irq_save();
 
       (*handler)(handler_arg);
+
+      __asm__ volatile("lw %0, 20(sp)" : "=r"(s1_slot));
+      __asm__ volatile("mv %0, s1" : "=r"(s1_reg));
+      if (s1_reg != 0x0f && s1_reg != 0x1f)
+        {
+          esp_rom_printf("[DBG] s1_slot=%08x s1_reg=%08x\n", s1_slot, s1_reg);
+        }
+
+      up_irq_restore(flags);
     }
   else
     {
