@@ -182,6 +182,7 @@
 #ifdef CONFIG_EXAMPLES_CAMPILOT
 extern int campilot_main(int argc, char *argv[]);
 
+#ifdef CONFIG_EXAMPLES_CAMPILOT_AUTOTEST
 static int configure_net(void)
 {
   struct sockaddr_in addr;
@@ -273,7 +274,8 @@ static int campilot_auto(int argc, char *argv[])
   printf("[campilot] auto-test done\n");
   return 0;
 }
-#endif
+#endif /* CONFIG_EXAMPLES_CAMPILOT_AUTOTEST */
+#endif /* CONFIG_EXAMPLES_CAMPILOT */
 
 /****************************************************************************
  * Public Functions
@@ -758,24 +760,13 @@ int esp_bringup(void)
     }
 #endif
 
-#ifdef CONFIG_EXAMPLES_CAMPILOT
+#ifdef CONFIG_EXAMPLES_CAMPILOT_AUTOTEST
   /* Auto-test campilot at boot: wait for network late-init then send a
    * text query to MiMo API. Output appears on serial console so we can
-   * verify without interactive input.
-   *
-   * Temporarily disabled (CAMPILOT_AUTOTEST_AT_BOOT 0) 2026-09-14: the
-   * console wedges (NSH stops responding to input) some time after this
-   * task runs to completion. Root cause not yet identified -- ruled out
-   * task priority and the JPEG encoder. "campilot" is still available as
-   * an interactive NSH command; only the auto-run-at-boot path is
-   * skipped while this is being investigated. */
+   * verify without interactive input. */
 
-#define CAMPILOT_AUTOTEST_AT_BOOT 0
-
-#if CAMPILOT_AUTOTEST_AT_BOOT
   int cpret = task_create("cptest", 100, 16384, campilot_auto, NULL);
   printf("[campilot] task_create ret=%d errno=%d\n", cpret, errno);
-#endif
 #endif
 
   /* If we got here then perhaps not all initialization was successful, but
