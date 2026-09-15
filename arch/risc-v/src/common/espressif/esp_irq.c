@@ -234,6 +234,20 @@ IRAM_ATTR static int esp_isr_demultiplexing(int irq, void *context,
   if (handler)
     {
       (*handler)(handler_arg);
+
+      /* Prevent tail-call optimization of the (*handler)(handler_arg)
+       * call. ESP-HAL peripheral ISRs are compiled against ESP-IDF (reached
+       * via _global_interrupt_handler, not a C tail-call frame) and may not
+       * preserve every callee-saved register. A tail call here would jump
+       * straight back to riscv_doirq and skip this function's epilogue, so
+       * any callee-saved register the ISR clobbers (s1 in the JPEG/DMA case)
+       * stays clobbered and crashes the demuxing caller. The volatile store
+       * below runs after the ISR returns, which keeps the epilogue alive so
+       * s0-s4 are restored from the stack. */
+
+      volatile int isr_barrier = irq;
+
+      UNUSED(isr_barrier);
     }
   else
     {
