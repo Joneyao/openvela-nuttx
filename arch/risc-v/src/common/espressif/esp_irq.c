@@ -198,8 +198,8 @@ IRAM_ATTR static void isr_adapter_func(void *arg)
  *
  ****************************************************************************/
 
-IRAM_ATTR static int esp_isr_demultiplexing(int irq, void *context,
-                                            void *arg)
+IRAM_ATTR __attribute__((optimize("no-optimize-sibling-calls")))
+static int esp_isr_demultiplexing(int irq, void *context, void *arg)
 {
   int cpuint = esp_get_cpuint(this_cpu(), irq);
   intr_handler_t handler;
@@ -233,21 +233,15 @@ IRAM_ATTR static int esp_isr_demultiplexing(int irq, void *context,
 
   if (handler)
     {
+      /* ESP-HAL peripheral ISRs are compiled against ESP-IDF (reached via
+       * _global_interrupt_handler, not a C tail-call frame) and may not
+       * preserve every callee-saved register. If this call were tail-call
+       * optimized it would jump straight back to riscv_doirq and skip this
+       * function's epilogue, leaking any callee-saved register the ISR
+       * clobbers (s1 in the JPEG/DMA case). The function is marked
+       * no-optimize-sibling-calls so the epilogue always restores s0-s3. */
+
       (*handler)(handler_arg);
-
-      /* Prevent tail-call optimization of the (*handler)(handler_arg)
-       * call. ESP-HAL peripheral ISRs are compiled against ESP-IDF (reached
-       * via _global_interrupt_handler, not a C tail-call frame) and may not
-       * preserve every callee-saved register. A tail call here would jump
-       * straight back to riscv_doirq and skip this function's epilogue, so
-       * any callee-saved register the ISR clobbers (s1 in the JPEG/DMA case)
-       * stays clobbered and crashes the demuxing caller. The volatile store
-       * below runs after the ISR returns, which keeps the epilogue alive so
-       * s0-s4 are restored from the stack. */
-
-      volatile int isr_barrier = irq;
-
-      UNUSED(isr_barrier);
     }
   else
     {
