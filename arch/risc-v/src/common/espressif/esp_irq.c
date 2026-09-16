@@ -233,23 +233,13 @@ static int esp_isr_demultiplexing(int irq, void *context, void *arg)
 
   if (handler)
     {
-      /* ESP-HAL peripheral ISRs are compiled against ESP-IDF (reached via
-       * _global_interrupt_handler, not a C tail-call frame) and may not
-       * preserve every callee-saved register. Run the ISR with interrupts
-       * masked and keep no-optimize-sibling-calls so the epilogue restores
-       * s0-s3. */
+      /* Run the peripheral ISR with interrupts masked so a nested IRQ taken
+       * while it is on the interrupt stack cannot clobber this dispatch
+       * frame.  no-optimize-sibling-calls keeps the epilogue intact. */
 
-      uint32_t s1_slot, s1_reg;
       irqstate_t flags = up_irq_save();
 
       (*handler)(handler_arg);
-
-      __asm__ volatile("lw %0, 20(sp)" : "=r"(s1_slot));
-      __asm__ volatile("mv %0, s1" : "=r"(s1_reg));
-      if (s1_reg != 0x0f && s1_reg != 0x1f)
-        {
-          esp_rom_printf("[DBG] s1_slot=%08x s1_reg=%08x\n", s1_slot, s1_reg);
-        }
 
       up_irq_restore(flags);
     }
@@ -607,7 +597,19 @@ IRAM_ATTR void *riscv_dispatch_irq(uintreg_t mcause, uintreg_t *regs)
           intr_handler_t hal_handler = intr_handler_get(cpuint);
           if (hal_handler != NULL)
             {
+              /* ESP-HAL peripheral ISRs (jpeg, dma2d) run with interrupts
+               * enabled here, unlike the esp_isr_demultiplexing path which
+               * masks them first.  A nested IRQ taken while the HAL ISR is
+               * on the interrupt stack can clobber this dispatch frame and
+               * corrupt the callee-saved registers it relies on, wedging
+               * the encode.  Mask interrupts across the call so the ISR
+               * runs to completion without re-entrancy. */
+
+              irqstate_t flags = up_irq_save();
+
               (*hal_handler)(intr_handler_get_arg(cpuint));
+
+              up_irq_restore(flags);
               return regs;
             }
 
