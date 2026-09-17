@@ -275,6 +275,21 @@ static int campilot_auto(int argc, char *argv[])
   return 0;
 }
 #endif /* CONFIG_EXAMPLES_CAMPILOT_AUTOTEST */
+
+#ifdef CONFIG_EXAMPLES_CAMPILOT_UI
+/* Auto-launch the LVGL card UI at boot.  The UI runs in its own task and
+ * does not block the NSH console, which makes the demo self-contained and
+ * lets the framebuffer be captured without interactive input.
+ */
+static int campilot_ui_autostart(int argc, char *argv[])
+{
+  char *uargs[] = {"campilot", "ui", NULL};
+
+  campilot_main(2, uargs);
+  return 0;
+}
+#endif /* CONFIG_EXAMPLES_CAMPILOT_UI */
+
 #endif /* CONFIG_EXAMPLES_CAMPILOT */
 
 /****************************************************************************
@@ -767,6 +782,14 @@ int esp_bringup(void)
 
   int cpret = task_create("cptest", 100, 16384, campilot_auto, NULL);
   printf("[campilot] task_create ret=%d errno=%d\n", cpret, errno);
+#endif
+
+#ifdef CONFIG_EXAMPLES_CAMPILOT_UI
+  /* Launch the LVGL card UI in its own task. */
+
+  int uiret = task_create("campilotui", 100, 32768, campilot_ui_autostart,
+                          NULL);
+  printf("[ui] autostart task_create ret=%d errno=%d\n", uiret, errno);
 #endif
 
   /* If we got here then perhaps not all initialization was successful, but

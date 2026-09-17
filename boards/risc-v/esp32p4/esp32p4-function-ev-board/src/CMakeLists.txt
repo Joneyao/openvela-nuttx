@@ -49,6 +49,10 @@ if(CONFIG_INPUT_GT9XX)
   list(APPEND SRCS esp32p4_touch.c)
 endif()
 
+if(CONFIG_ESP32P4_GT911_SHIM)
+  list(APPEND SRCS gt911_board.c)
+endif()
+
 target_sources(board PRIVATE ${SRCS})
 
 # ##############################################################################
